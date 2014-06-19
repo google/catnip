@@ -1,0 +1,13 @@
+catnip-node/etc/sudoers.d/10-catnip-node /etc/sudoers.d
+catnip-node/usr/bin/catnip-add-key /usr/bin
+catnip-node/usr/bin/catnip-run /usr/bin
+catnip-node/usr/bin/catnip-status /usr/bin
+catnip-node/usr/bin/catnip-test /usr/bin
+catnip-node/usr/lib/catnip-node/cleanup.sh /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/catnip-sandbox-init /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/catnip-sandbox-init-user /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/health-check.sh /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/ipc.conf /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/newpid /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/startup.sh /usr/lib/catnip-node
+catnip-node/usr/lib/catnip-node/testdata/* /usr/lib/catnip-node/testdata

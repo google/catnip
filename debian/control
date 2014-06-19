@@ -1,0 +1,32 @@
+Source: catnip
+Section: admin
+Priority: extra
+Maintainer: Shuhei Takahashi <nya@google.com>
+Build-Depends: debhelper (>= 8.0.0), python-setuptools, python-dev
+X-Python-Version: >= 2.7
+Standards-Version: 3.9.3
+
+Package: catnip-common
+Architecture: any
+Depends: ${python:Depends}, libc6-dev | libc-dev, ${misc:Depends}
+XB-Python-Version: ${python:Versions}
+Description: Distributed system to run untrusted programs - common package
+ Catnip builds distributed system to run untrusted programs in a secure sandbox.
+ .
+ This package provides a Python package common to catnip tools.
+
+Package: catnip-client
+Architecture: any
+Depends: catnip-common (= ${binary:Version}), ${python:Depends}, openssh-client, ${misc:Depends}
+Description: Distributed system to run untrusted programs - client package
+ Catnip builds distributed system to run untrusted programs in a secure sandbox.
+ .
+ This package provides a client program to send programs to a Catnip node.
+
+Package: catnip-node
+Architecture: any
+Depends: catnip-common (= ${binary:Version}), catnip-client (= ${binary:Version}), openssh-server, gcc, sudo, adduser, procps, cgroup-lite, ${python:Depends}, ${misc:Depends}
+Description: Distributed system to run untrusted programs - sandbox package
+ Catnip builds distributed system to run untrusted programs in a secure sandbox.
+ .
+ This package is to be installed in leaf sandbox nodes.

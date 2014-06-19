@@ -1,0 +1,15 @@
+#!/bin/bash
+
+set -e
+
+# Mark as not configured.
+rm -f /var/cache/catnip-node/state/configured
+rm -f /var/cache/catnip-node/state/setup
+rm -f /var/cache/catnip-node/state/health
+
+echo "Waiting for all sandboxes to stop..."
+exec 3> /var/cache/catnip-node/lock/master
+flock -x 3
+exec 3>&-
+
+#DEBHELPER#

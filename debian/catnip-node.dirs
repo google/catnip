@@ -1,0 +1,6 @@
+/var/cache/catnip-node
+/var/cache/catnip-node/chroot
+/var/cache/catnip-node/home
+/var/cache/catnip-node/lock
+/var/cache/catnip-node/run
+/var/cache/catnip-node/state

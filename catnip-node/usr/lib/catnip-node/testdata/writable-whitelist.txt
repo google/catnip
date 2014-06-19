@@ -1,0 +1,10 @@
+/dev/full
+/dev/null
+/dev/random
+/dev/stderr
+/dev/stdin
+/dev/stdout
+/dev/urandom
+/dev/zero
+/tmp
+/var/tmp

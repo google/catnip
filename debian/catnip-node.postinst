@@ -1,0 +1,57 @@
+#!/bin/bash
+
+set -e
+
+action="$1"
+oldversion="$2"
+
+if [[ "$action" == "configure" ]]; then
+
+  # Unmount legacy mount points.
+  if [[ -d /var/cache/catnip-node/home ]]; then
+    find /var/cache/catnip-node/home -mindepth 1 -maxdepth 1 -type d | \
+        while read i; do
+      umount "$i" > /dev/null 2>&1 || :
+    done
+  fi
+
+  # Remove legacy sysctl config.
+  rm -f /etc/sysctl.d/99-disable-ipc.conf
+
+  adduser --system --quiet --group --no-create-home \
+      --home /var/cache/catnip-node --shell /bin/sh catnip || :
+  adduser --system --quiet --group --no-create-home \
+      --home /nonexistent catnip-sandbox || :
+
+  mkdir -m 755 /var/cache/catnip-node/.ssh > /dev/null 2>&1 || :
+  if [[ ! -f /var/cache/catnip-node/.ssh/authorized_keys ]]; then
+    echo "# Add catnip SSH keys in this file." \
+        > /var/cache/catnip-node/.ssh/authorized_keys
+    chmod 640 /var/cache/catnip-node/.ssh/authorized_keys
+    chown root:catnip /var/cache/catnip-node/.ssh/authorized_keys
+  fi
+  if [[ ! -f /var/cache/catnip-node/.ssh/health-check-key ]]; then
+    ssh-keygen -f /var/cache/catnip-node/.ssh/health-check-key -N '' -C "health-check-key" > /dev/null 2>&1
+    cat /var/cache/catnip-node/.ssh/health-check-key.pub | catnip-add-key > /dev/null 2>&1
+  fi
+
+  # Legacy catnip-node (<= 1.0.1) did not make use of cgroup-lite.
+  if grep -q '^none /cgroup cgroup ' /proc/mounts > /dev/null 2>&1; then
+    if umount /cgroup > /dev/null 2>&1; then
+      rmdir /cgroup || :
+      if ! service cgroup-lite restart; then
+        echo "ERROR: Failed to start cgroup-lite!"
+        echo "Please reboot the machine."
+      fi
+    else
+      echo "ERROR: Could not remove legacy /cgroup directory!"
+    fi
+  fi
+
+  touch /var/cache/catnip-node/state/configured
+
+fi
+
+#DEBHELPER#
+
+exit 0

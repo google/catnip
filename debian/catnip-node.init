@@ -1,0 +1,58 @@
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:          catnip-node
+# Required-Start:    $remote_fs $syslog $all
+# Required-Stop:     $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Run catnip-node startup/cleanup scripts
+### END INIT INFO
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+. /lib/init/vars.sh
+. /lib/lsb/init-functions
+
+do_start() {
+  if [ -x /usr/lib/catnip-node/startup.sh ]; then
+    log_begin_msg "Setting up catnip sandboxes"
+    /usr/lib/catnip-node/startup.sh
+    ES=$?
+    log_end_msg $ES
+    start-stop-daemon --start --background --exec /usr/lib/catnip-node/health-check.sh
+    echo "Performing health check in background..."
+  fi
+  return $ES
+}
+
+do_stop() {
+  if [ -x /usr/lib/catnip-node/cleanup.sh ]; then
+    log_begin_msg "Cleaning up catnip sandboxes"
+    /usr/lib/catnip-node/cleanup.sh
+    ES=$?
+    log_end_msg $ES
+  fi
+  return $ES
+}
+
+case "$1" in
+  start)
+    do_start
+    ;;
+  restart)
+    do_stop
+    sleep 1
+    do_start
+    ;;
+  reload|force-reload)
+    echo "Error: argument '$1' not supported" >&2
+    exit 3
+    ;;
+  stop)
+    do_stop
+    ;;
+  *)
+    echo "Usage: $0 start|restart|stop" >&2
+    exit 3
+    ;;
+esac

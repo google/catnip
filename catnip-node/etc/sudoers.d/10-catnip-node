@@ -1,0 +1,1 @@
+catnip ALL=(root) NOPASSWD: /usr/bin/catnip-run, /usr/bin/catnip-status

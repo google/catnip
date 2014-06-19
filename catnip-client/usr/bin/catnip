@@ -1,0 +1,339 @@
+#!/usr/bin/python
+#
+# Copyright 2014 Google Inc. All rights reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import optparse
+import os
+import subprocess
+import sys
+
+import catnip.client
+import catnip.sandbox
+import catnip.util
+
+
+class GeneralParams(catnip.util.ValidatedStruct):
+  output = catnip.util.ValidatedProperty(type=str, default='')
+  hostname = catnip.util.ValidatedProperty(type=str)
+  port = catnip.util.ValidatedProperty(
+      type=int, validator=catnip.util.RangeValidator(1, 65535), default=22)
+  username = catnip.util.ValidatedProperty(type=str, default='catnip')
+  identity_file = catnip.util.ValidatedProperty(type=str, default='')
+  disk_image = catnip.util.ValidatedProperty(type=str, default='')
+  extra_files = catnip.util.ValidatedProperty(type=list, default=[])
+  check_ssh_host_key = catnip.util.ValidatedProperty(type=bool, default=False)
+  multiplex = catnip.util.ValidatedProperty(type=bool, default=False)
+  debug = catnip.util.ValidatedProperty(type=bool, default=False)
+
+
+class CatnipOptionParser(object):
+  def ParseArgs(self):
+    self._Initialize()
+    parser = self._BuildParser()
+    args = sys.argv[1:]
+    if not args:
+      parser.print_help()
+      sys.exit(0)
+    _, extra_args = parser.parse_args(args)
+    if len(extra_args) != 1:
+      parser.print_usage()
+      if not extra_args:
+        print 'catnip: error: No command specified.'
+      else:
+        print 'catnip: error: Extra arguments specified.'
+      sys.exit(1)
+    command = extra_args[0]
+    self._Validate(command, parser)
+    return (command, self._general_params, self._sandbox_params, self._requests)
+
+  def _Validate(self, command, parser):
+    errors = []
+    if command not in ('run', 'status', 'end-multiplex'):
+      errors.append('Unknown command: %s.' % command)
+    if not self._general_params.hostname:
+      errors.append('--host not specified.')
+    if command == 'run' and not self._requests:
+      errors.append('--command not specified.')
+    if errors:
+      parser.print_usage()
+      for error in errors:
+        print 'catnip: error: %s' % error
+      sys.exit(1)
+
+  def _Initialize(self):
+    self._general_params = GeneralParams()
+    self._sandbox_params = catnip.sandbox.SandboxParams()
+    self._requests = []
+    self._current_request = catnip.sandbox.RunRequest()
+    self._sandbox_params.cpu = 0
+    self._sandbox_params.share_cpu = False
+    self._sandbox_params.block = True
+    self._sandbox_params.disk_limit_kb = 65536
+    self._current_request.time_limit_sec = 5
+    self._current_request.cpu_time_limit_sec = 0
+    self._current_request.memory_limit_kb = 65536
+    self._current_request.output_limit_kb = 16
+
+  def _BuildParser(self):
+    parser = optparse.OptionParser(
+        add_help_option=False,
+        usage='%prog {run|status|end-multiplex} [options]',
+        description='Runs a program on a remote Catnip node.',
+        formatter=optparse.TitledHelpFormatter())
+
+    # General options
+    group = optparse.OptionGroup(
+        parser,
+        'General options')
+    group.add_option(
+        '-O', '--output',
+        dest='output', type='string', metavar='<FILE>',
+        action='callback', callback=self._GeneralOptionCallback,
+        help=('Instead of printing human-readable result to standard output, '
+              'writes a response tarball to the specified path. '
+              'Effective only for "run" command.'))
+    group.add_option(
+        '-h', '--help',
+        action='help',
+        help='Show this help message and exit.')
+    group.add_option(
+        '--debug',
+        dest='debug', nargs=0,
+        action='callback', callback=self._DebugCallback,
+        help='Turn on debug mode.')
+    parser.add_option_group(group)
+
+    # Connection options
+    group = optparse.OptionGroup(
+        parser,
+        'Connection options')
+    group.add_option(
+        '-H', '--host',
+        dest='hostname', type='string', metavar='<HOSTNAME>',
+        action='callback', callback=self._GeneralOptionCallback,
+        help='The name of the catnip node host connecting to.')
+    group.add_option(
+        '-p', '--port',
+        dest='port', type='int', metavar='<PORT>',
+        action='callback', callback=self._GeneralOptionCallback,
+        help='SSH port (default: 22).')
+    group.add_option(
+        '-u', '--user',
+        dest='username', type='string', metavar='<USERNAME>',
+        action='callback', callback=self._GeneralOptionCallback,
+        help='The name of the user we\'re connecting as (default: "catnip").')
+    group.add_option(
+        '-i', '--identity-file',
+        dest='identity_file', type='string', metavar='<FILE>',
+        action='callback', callback=self._GeneralOptionCallback,
+        help=('The path of a supplimental SSH secret key file used to connect '
+              'to the catnip node.'))
+    group.add_option(
+        '--check-ssh-host-key',
+        dest='check_ssh_host_key', nargs=0, callback_kwargs={'const': True},
+        action='callback', callback=self._GeneralOptionCallback,
+        help=('Performs SSH known_hosts checking. By default, known_hosts is '
+              'ignored.'))
+    group.add_option(
+        '--multiplex',
+        dest='multiplex', nargs=0, callback_kwargs={'const': True},
+        action='callback', callback=self._GeneralOptionCallback,
+        help=('EXPERIMENTAL: Share a SSH connection between requests. '
+              'This option will decrease overhead of SSH authentication. '))
+    parser.add_option_group(group)
+
+    # Sandbox initialization options
+    group = optparse.OptionGroup(
+        parser,
+        'Sandbox initialization options',
+        'These parameters are fixed between command runs. '
+        'If you specify an option several times, the last value will be used.')
+    group.add_option(
+        '-k', '--cpu',
+        dest='cpu', type='int', metavar='<NUM>',
+        action='callback', callback=self._SandboxParamsValueCallback,
+        help='Specify a CPU index to use (default: 0).')
+    group.add_option(
+        '--share-cpu',
+        dest='share_cpu', nargs=0, callback_kwargs={'const': True},
+        action='callback', callback=self._SandboxParamsValueCallback,
+        help=('Allow a job to share the CPU specified by --cpu to run in '
+              'parallel with other --share-cpu jobs.'))
+    group.add_option(
+        '--no-block',
+        dest='block', nargs=0, callback_kwargs={'const': False},
+        action='callback', callback=self._SandboxParamsValueCallback,
+        help=('Fail fast when the CPU specified by --cpu is unavailable '
+              'because of locks by other jobs. If this flag is not specified, '
+              'release of locks will be waited indefinitely.'))
+    group.add_option(
+        '-d', '--disk-limit',
+        dest='disk_limit_kb', type='int', metavar='<KB>',
+        action='callback', callback=self._SandboxParamsValueCallback,
+        help=('Set a local disk usage limit in KB (default: 65536). '
+              'Note that Catnip will use tmpfs (RAM disk) for disk space so '
+              'a job can consume --disk-limit + --memory-limit memory at '
+              'maximum.'))
+    group.add_option(
+        '--ignore-health',
+        dest='ignore_health', nargs=0, callback_kwargs={'const': True},
+        action='callback', callback=self._SandboxParamsValueCallback,
+        help=optparse.SUPPRESS_HELP)
+    group.add_option(
+        '-f', '--disk-image',
+        dest='disk_image', type='string', metavar='<FILE>',
+        action='callback', callback=self._GeneralOptionCallback,
+        help='Specify an uncompressed tarball expanded on initialization.')
+    group.add_option(
+        '-a', '--extra-file',
+        dest='extra_files', type='string', metavar='<FILE>',
+        action='callback', callback=self._ExtraFileCallback,
+        help='Specify extra files sent to a catnip node.')
+    parser.add_option_group(group)
+
+    # Per-run options
+    group = optparse.OptionGroup(
+        parser,
+        'Per-run options',
+        '--command option after setting per-run limits will queue '
+        'a single run with the specified limits. '
+        'To use different limits for different runs, '
+        'repeat them multiple times, each between --command options.')
+    group.add_option(
+        '-t', '--time-limit',
+        dest='time_limit_sec', type='float', metavar='<sec>',
+        action='callback', callback=self._RunRequestValueCallback,
+        help='Set a time limit in seconds (default: 5).')
+    group.add_option(
+        '-T', '--cpu-time-limit',
+        dest='cpu_time_limit_sec', type='float', metavar='<sec>',
+        action='callback', callback=self._RunRequestValueCallback,
+        help='Set a CPU time limit in seconds (default: 0).')
+    group.add_option(
+        '-m', '--memory-limit',
+        dest='memory_limit_kb', type='int', metavar='<KB>',
+        action='callback', callback=self._RunRequestValueCallback,
+        help='Set a memory usage limit in KB (default: 65536).')
+    group.add_option(
+        '-o', '--output-limit',
+        dest='output_limit_kb', type='int', metavar='<KB>',
+        action='callback', callback=self._RunRequestValueCallback,
+        help='Set an output size limit in KB (default: 16).')
+    group.add_option(
+        '-c', '--command',
+        dest='command', type='string', metavar='<COMMAND>',
+        action='callback', callback=self._CommandCallback,
+        help='Run the command in the catnip node.')
+    parser.add_option_group(group)
+
+    return parser
+
+  def _GeneralOptionCallback(self, option, opt_str, value, parser, const=None):
+    if option.nargs == 0:
+      value = const
+    try:
+      setattr(self._general_params, option.dest, value)
+    except ValueError:
+      raise optparse.OptionValueError('Invalid value for %s.' % opt_str)
+
+  def _SandboxParamsValueCallback(
+      self, option, opt_str, value, parser, const=None):
+    if option.nargs == 0:
+      value = const
+    try:
+      setattr(self._sandbox_params, option.dest, value)
+    except ValueError:
+      raise optparse.OptionValueError('Invalid value for %s.' % opt_str)
+
+  def _RunRequestValueCallback(
+      self, option, opt_str, value, parser, const=None):
+    if option.nargs == 0:
+      value = const
+    try:
+      setattr(self._current_request, option.dest, value)
+    except ValueError:
+      raise optparse.OptionValueError('Invalid value for %s.' % opt_str)
+
+  def _CommandCallback(self, option, opt_str, value, parser):
+    self._current_request.command = value
+    if not self._current_request.Validate():
+      raise optparse.OptionValueError(
+          'Insufficient limit options are specified before %s.' % opt_str)
+    self._requests.append(self._current_request.Copy())
+
+  def _DebugCallback(self, option, opt_str, value, parser):
+    self._general_params.debug = True
+    self._sandbox_params.debug = True
+
+  def _ExtraFileCallback(self, option, opt_str, value, parser):
+    self._general_params.extra_files.append(value)
+
+
+def CreateClient(general_params):
+  client = catnip.client.CatnipClient()
+  client.SetHost(general_params.hostname, general_params.port)
+  client.SetUser(general_params.username)
+  if general_params.identity_file:
+    client.SetIdentityFile(general_params.identity_file)
+  if general_params.disk_image:
+    client.SetDiskImageStream(open(general_params.disk_image))
+  client.SetCheckSSHHostKey(general_params.check_ssh_host_key)
+  client.SetMultiplex(general_params.multiplex)
+  client.SetDebug(general_params.debug)
+  return client
+
+
+def CreateRunResponseCallback(general_params):
+  def RunResponseCallback(success, status, reader):
+    if success:
+      for key, value in status.iteritems():
+        print '%s: %s' % (key, value)
+      print
+      reader.ReadToStream(sys.stdout)
+    else:
+      print 'returncode: -1'
+      print 'error: %s' % status['error']
+      print
+      if general_params.debug:
+        sys.stdout.write(status.get('traceback', ''))
+  return RunResponseCallback
+
+
+def main():
+  parser = CatnipOptionParser()
+  command, general_params, sandbox_params, requests = parser.ParseArgs()
+  try:
+    client = CreateClient(general_params)
+    if command == 'status':
+      sys.stdout.write(client.GetStatus())
+    elif command == 'end-multiplex':
+      client.EndMultiplex()
+    else:  # command == 'run'
+      if general_params.output:
+        client.Run(sandbox_params, requests, general_params.extra_files,
+                   output_filename=general_params.output)
+      else:
+        client.Run(sandbox_params, requests, general_params.extra_files,
+                   callback=CreateRunResponseCallback(general_params))
+  except catnip.client.ClientError, e:
+    print >>sys.stderr, e
+    if not general_params.debug:
+      print >>sys.stderr, 'Try --debug to look into details'
+  except KeyboardInterrupt:
+    pass  # Quit gracefully
+
+
+if __name__ == '__main__':
+  main()

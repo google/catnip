@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -e
+
+action="$1"
+
+if [[ "$action" = "purge" ]]; then
+
+  i=0
+  while grep -q "^catnip$i:" /etc/passwd; do
+    deluser --system --quiet catnip$i || :
+    umount /var/cache/catnip-node/home/$i > /dev/null 2>&1 || :
+    rm -rf /var/cache/catnip-node/home/$i
+    rm -f /var/cache/catnip-node/lock/$i
+    rm -f /var/cache/catnip-node/output/$i
+    i=$((i + 1))
+  done
+  deluser --system --quiet catnip || :
+  rm -rf /var/cache/catnip-node
+
+fi
+
+#DEBHELPER#
+
+exit 0

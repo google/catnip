@@ -1,0 +1,356 @@
+#!/usr/bin/python
+#
+# Copyright 2014 Google Inc. All rights reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import commands
+import json
+import fnmatch
+import os
+import StringIO
+import subprocess
+import sys
+import tarfile
+import traceback
+
+
+TESTDATA_DIR = '/usr/lib/catnip-node/testdata'
+HEALTH_CHECK_KEY_PATH = '/var/cache/catnip-node/.ssh/health-check-key'
+
+
+def ParseCatnipOutput(output):
+  with tarfile.open(fileobj=StringIO.StringIO(output)) as tar:
+    names = tar.getnames()
+    if 'ERROR' in names:
+      return {'returncode': -1, 'error': tar.extractfile('ERROR').read()}
+    last_run_id = sorted(
+        filter(lambda name: name.startswith('RUNS/'), names))[-1].split('/')[1]
+    response = json.load(tar.extractfile('RUNS/%s/STATUS' % last_run_id))
+    response['body'] = tar.extractfile('RUNS/%s/OUTPUT' % last_run_id).read()
+    response['returncode'] = int(response['returncode'])
+    if 'cputime' in response:
+      response['cputime'] = float(response['cputime'])
+    if 'memory' in response:
+      response['memory'] = int(response['memory'])
+    return response
+
+def RunCatnip(extra_args=[], time_limit=60, memory_limit=65536, disk_limit=16384,
+             output_limit=4, proc_only=False):
+  args = ['catnip', 'run']
+  args.extend(['--host', '127.0.0.1'])
+  args.extend(['--identity-file', HEALTH_CHECK_KEY_PATH])
+  args.extend(['--time-limit', '%.3f' % time_limit])
+  args.extend(['--memory-limit', '%d' % memory_limit])
+  args.extend(['--disk-limit', '%d' % disk_limit])
+  args.extend(['--output-limit', '%d' % output_limit])
+  args.extend(['--ignore-health'])
+  args.extend(['--output', '/dev/stdout'])
+  args.extend(extra_args)
+  proc = subprocess.Popen(args, stdout=subprocess.PIPE)
+  if proc_only:
+    return proc
+  output = proc.communicate(None)[0]
+  response = ParseCatnipOutput(output)
+  global last_response
+  last_response = response
+  return response
+
+def CompileAndRun(source_name, opts='', time_limit=60, **kwargs):
+  assert source_name.endswith('.c'), 'Not supported extension'
+  return RunCatnip(['--time-limit', '0',
+                   '--command', 'gcc %s %s' % (source_name, opts),
+                   '--time-limit', '%.3f' % time_limit,
+                   '--command', 'exec ./a.out',
+                   '--extra-file', os.path.join(TESTDATA_DIR, source_name)],
+                  **kwargs)
+
+def RunExecutable(source_name, **kwargs):
+  return RunCatnip(['--command', './%s' % source_name,
+                   '--extra-file', os.path.join(TESTDATA_DIR, source_name)],
+                  **kwargs)
+
+def RunCommand(command, **kwargs):
+  return RunCatnip(['--command', command], **kwargs)
+
+def RunTarball(tar_name, **kwargs):
+  return RunCatnip(['--disk-image', os.path.join(TESTDATA_DIR, tar_name),
+                   '--command', './main'],
+                  **kwargs)
+
+def RunCommandAsRoot(command):
+  return commands.getoutput(command)
+
+def LoadTestdata(name):
+  with open(os.path.join(TESTDATA_DIR, name)) as f:
+    return f.read()
+
+
+_TESTS = []
+
+def Test(f):
+  _TESTS.append(f)
+  f._critical = False
+
+def CriticalTest(f):
+  _TESTS.append(f)
+  f._critical = True
+
+def RunTests():
+  global last_response
+  _TESTS.sort(key=lambda f: f._critical and 1 or 2)
+  runs = 0
+  fails = 0
+  tests = []
+  args = sys.argv[1:]
+  if not args:
+    tests = _TESTS
+  else:
+    for test in args:
+      hits = filter(lambda t: fnmatch.fnmatchcase(t.__name__, test), _TESTS)
+      if not hits:
+        print 'Unknown test: %s' % test
+        return 1
+      tests.extend(hits)
+  print 'Running %d health check tests...' % len(tests)
+  for test in tests:
+    runs += 1
+    sys.stdout.write('%s ' % test.__name__)
+    sys.stdout.flush()
+    last_response = None
+    try:
+      test()
+      print 'OK.'
+    except KeyboardInterrupt:
+      break
+    except:
+      fails += 1
+      print 'FAILED!'
+      traceback.print_exc(file=sys.stdout)
+      if last_response:
+        print last_response
+      if test._critical:
+        print 'Critical test failed. Aborting.'
+        break
+  print 'Ran %d tests, %d failed.' % (runs, fails)
+  if fails > 0:
+    return 1
+  return 0
+
+
+##############################################################################
+
+@CriticalTest
+def TestSuccess():
+  response = RunCommand('echo Hello')
+  assert set(response.keys()) == set(
+      ('returncode', 'time', 'cputime', 'memory', 'body', 'length', 'command'))
+  assert response['returncode'] == 0
+  float(response['time'])
+  float(response['cputime'])
+  int(response['memory'])
+  assert response['command'] == 'echo Hello'
+  assert int(response['length']) == 6
+  assert response['body'] == 'Hello\n'
+
+@CriticalTest
+def TestNoAccountWithPassword():
+  output = RunCommandAsRoot('grep "^[^:]*:[^*!]" /etc/shadow')
+  assert output == ''
+
+@CriticalTest
+def TestNoNetworkAccess():
+  response = RunCommand('wget -q -O - http://www.google.com/ > /dev/null 2>&1')
+  assert response['returncode'] > 0
+
+@Test
+def TestDevNullWritable():
+  response = RunCommand('exec > /dev/null')
+  assert response['returncode'] == 0
+
+@Test
+def TestFail():
+  response = RunCommand('echo Hello; exit 28')
+  assert response['returncode'] == 28
+  float(response['cputime'])
+  int(response['memory'])
+  assert response['body'] == 'Hello\n'
+
+@Test
+def TestSignalExit():
+  response = RunCommand('echo Hello; kill $$')
+  assert response['returncode'] == 143  # SIGTERM
+  float(response['cputime'])
+  int(response['memory'])
+  assert response['body'] == 'Hello\n'
+
+@Test
+def TestHomeSet():
+  response = RunCommand('echo $PWD; echo $HOME')
+  assert response['returncode'] == 0
+  lines = response['body'].splitlines()
+  assert len(lines) == 2
+  assert lines[0] == '/home/catnip-sandbox'
+  assert lines[1] == '/home/catnip-sandbox'
+
+@Test
+def TestWritable():
+  whitelist = LoadTestdata('writable-whitelist.txt').splitlines()
+  response = RunCommand('find / -path /proc -prune -false -or '
+                        '-path /home -prune -false -or '
+                        '-writable',
+                        time_limit=0)
+  assert response['returncode'] < 128
+  lines = response['body'].splitlines()
+  for writable in lines:
+    for pattern in whitelist:
+      if fnmatch.fnmatch(writable, pattern):
+        break
+    else:
+      raise AssertionError('%s not in whitelist' % writable)
+
+@Test
+def TestSetuidDisabled():
+  response = RunCommand('sudo -l 2>&1')
+  assert response['returncode'] > 0
+  assert response['body'].strip() == 'sudo: must be setuid root'
+
+@Test
+def TestEmptyTarball():
+  response = RunTarball('empty.tar')
+  assert response['returncode'] == 127
+
+@Test
+def TestCorruptedTarball():
+  response = RunTarball('corrupted.tar')
+  assert response['returncode'] == -1
+  assert response['error'] == 'Tar command failed'
+
+@Test
+def TestAllowNoTimeLimit():
+  response = RunCommand('sleep 1', time_limit=0)
+  assert response['returncode'] == 0
+
+@Test
+def TestForkBomb():
+  response = CompileAndRun('fork_bomb.c')
+  assert response['returncode'] == 0
+  depth = int(response['body'].strip())
+  assert 60 <= depth <= 64
+
+@Test
+def TestCloneBomb():
+  response = CompileAndRun('clone_bomb.c')
+  assert response['returncode'] == 143  # SIGTERM
+  depth = int(response['body'].strip())
+  assert 60 <= depth <= 64
+
+@Test
+def TestSignalHandler():
+  response = CompileAndRun('signal_handler.c', time_limit=1)
+  assert response['returncode'] == 137  # SIGKILL
+
+@Test
+def TestLongSleep():
+  response = RunCommand('sleep 10', time_limit=1)
+  assert response['returncode'] == 137  # SIGKILL
+
+@Test
+def TestOutputLimit():
+  response = RunCommand('yes FATE')
+  assert response['returncode'] == 141  # SIGPIPE
+  assert len(response['body']) == 4096
+
+@Test
+def TestMemoryLimit():
+  response = CompileAndRun('calloc_fork.c')
+  assert response['returncode'] == 137  # SIGKILL
+  assert 63*1024 <= response['memory'] <= 65*1024
+
+@Test
+def TestIpcShm():
+  response = CompileAndRun('ipc_shm.c')
+  assert response['returncode'] == 1
+  assert 'shmget failed' in response['body']
+
+@Test
+def TestIpcMsg():
+  response = CompileAndRun('ipc_msg.c')
+  assert response['returncode'] == 1
+  assert 'msgget failed' in response['body']
+
+@Test
+def TestIpcSemaphore():
+  response = CompileAndRun('ipc_sem.c', '-lrt -lpthread')
+  assert response['returncode'] == 1
+  assert 'sem_open failed' in response['body']
+
+@Test
+def TestIpcUnixMqueue():
+  response = CompileAndRun('ipc_mq.c', '-lrt')
+  assert response['returncode'] == 1
+  assert 'mq_open failed' in response['body']
+
+@Test
+def TestDBus():
+  response = RunCommand(
+      'dbus-send --system --dest=org.freedesktop.DBus --type=method_call '
+      '--print-reply /org/freedesktop/DBus '
+      'org.freedesktop.DBus.Introspectable.Introspect')
+  assert response['returncode'] > 0
+
+@Test
+def TestDaemon():
+  response = CompileAndRun('daemon.c')
+  assert response['returncode'] == 0
+  response = RunCommand('ps ax -o comm | grep -q test-daemon')
+  assert response['returncode'] == 1
+
+@Test
+def TestSyslog():
+  output = RunCommandAsRoot('stat -c %s /var/log/syslog')
+  pre_size = output.strip()
+  response = CompileAndRun('syslog_flood.c')
+  assert response['returncode'] == 0
+  output = RunCommandAsRoot('stat -c %s /var/log/syslog')
+  post_size = output.strip()
+  assert pre_size == post_size
+
+@Test
+def TestSymlinkOutDir():
+  response = CompileAndRun('symlink_outdir.c')
+  assert response['returncode'] == 1
+
+@Test
+def TestSymlinkOutFile():
+  response = CompileAndRun('symlink_outfile.c')
+  assert response['returncode'] == 0
+  assert 'success' not in response['body']
+
+@Test
+def TestNoLoopbackSSH():
+  response = RunExecutable('loopback_ssh.sh')
+  assert 'loopback success' not in response['body']
+
+
+##############################################################################
+
+
+def main():
+  if os.getuid() != 0:
+    print >>sys.stderr, 'You must be root to run tests.'
+    sys.exit(1)
+  sys.exit(RunTests())
+
+if __name__ == '__main__':
+  main()
